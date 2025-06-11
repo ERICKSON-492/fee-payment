@@ -224,6 +224,28 @@ def set_fee():
         return redirect(url_for('set_fee'))
 
     return render_template('set_fee.html')
+@app.route('/record_payment', methods=['GET', 'POST'])
+def record_payment():
+    with sqlite3.connect(DATABASE) as conn:
+        c = conn.cursor()
+        c.execute('SELECT admission_no, name FROM students')
+        students = c.fetchall()
+
+    if request.method == 'POST':
+        admission_no = request.form['admission_no']
+        amount_paid = float(request.form['amount_paid'])
+        payment_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute('INSERT INTO payments (admission_no, amount_paid, payment_date) VALUES (?, ?, ?)',
+                      (admission_no, amount_paid, payment_date))
+            conn.commit()
+
+        flash('Payment recorded successfully.', 'success')
+        return redirect(url_for('record_payment'))
+
+    return render_template('record_payment.html', students=students)
 
 if __name__ == '__main__':
     init_db()
