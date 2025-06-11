@@ -205,6 +205,25 @@ def send_reminders():
     flash(f'Reminders sent to {count} students.', 'success')
     return redirect(url_for('index'))
 
+@app.route('/set_fee', methods=['GET', 'POST'])
+def set_fee():
+    if request.method == 'POST':
+        class_name = request.form['class_name']
+        fee_amount = request.form['fee_amount']
+        
+        if not class_name or not fee_amount:
+            flash('All fields are required.', 'error')
+            return redirect(url_for('set_fee'))
+
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute('REPLACE INTO fee_structure (class, fee_amount) VALUES (?, ?)', (class_name, fee_amount))
+            conn.commit()
+        
+        flash('Fee set successfully!', 'success')
+        return redirect(url_for('set_fee'))
+
+    return render_template('set_fee.html')
 
 if __name__ == '__main__':
     init_db()
