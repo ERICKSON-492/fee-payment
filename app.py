@@ -246,6 +246,56 @@ def record_payment():
         return redirect(url_for('record_payment'))
 
     return render_template('record_payment.html', students=students)
+@app.route('/set_due_date', methods=['GET', 'POST'])
+def set_due_date():
+    with sqlite3.connect(DATABASE) as conn:
+        c = conn.cursor()
+        c.execute('SELECT admission_no, name FROM students')
+        students = c.fetchall()
+
+    if request.method == 'POST':
+        admission_no = request.form['admission_no']
+        due_date = request.form['due_date']
+
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute('INSERT INTO fee_cycles (admission_no, due_date) VALUES (?, ?)',
+                      (admission_no, due_date))
+            conn.commit()
+
+        flash('Due date set successfully.', 'success')
+        return redirect(url_for('set_due_date'))
+
+    return render_template('set_due_date.html', students=students)
+@app.route('/check_due')
+def check_due():
+    with sqlite3.connect(DATABASE) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute('SELECT * FROM students')
+        students = c.fetchall()
+
+    def get_total_fee(adm):
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute('SELECT fee_amount FROM fee_structure WHERE class = (SELECT class FROM students WHERE admission_no=?)', (adm,))
+            result = c.fetchone()
+            return result[0] if result else 0.0
+
+    def get_total_paid(adm):
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute('SELECT SUM(amount_paid) FROM payments WHERE admission_no = ?', (adm,))
+            result = c.fetchone()
+            return result[0] if result[0] else 0.0
+
+    def get_due_amount(adm):
+        return get_total_fee(adm) - get_total_paid(adm)
+
+    return render_template("check_due.html", students=students,
+                           get_total_fee=get_total_fee,
+                           get_total_paid=get_total_paid,
+                           get_due_amount=get_due_amount)
 
 if __name__ == '__main__':
     init_db()
