@@ -296,7 +296,11 @@ def check_due():
                            get_total_fee=get_total_fee,
                            get_total_paid=get_total_paid,
                            get_due_amount=get_due_amount)
+# ... (all your route functions and other logic above)
 
 if __name__ == '__main__':
     init_db()
-    app.run(debug=True)
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
