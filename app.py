@@ -1,306 +1,244 @@
-"""Fee Management System Application using Flask"""
-
-import os
-import re
-import sqlite3
-import logging
-from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, flash
-from twilio.rest import Client
-from twilio.base.exceptions import TwilioRestException
+import sqlite3
+import os
+from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev_secret_key')
-DATABASE = 'school_fees.db'
+app.secret_key = 'your-secret-key'  # For flash messages
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-PHONE_REGEX = re.compile(r'^\+?[1-9]\d{7,14}$')
-
+DB_PATH = 'database.db'
 
 def init_db():
-    """Initialize the database with necessary tables."""
-    with sqlite3.connect(DATABASE) as conn:
+    if not os.path.exists(DB_PATH):
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS students (
-                        admission_no TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        class TEXT NOT NULL,
-                        phone TEXT NOT NULL)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS fee_structure (
-                        class TEXT PRIMARY KEY,
-                        fee_amount REAL NOT NULL)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS payments (
-                        payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        admission_no TEXT NOT NULL,
-                        amount_paid REAL NOT NULL,
-                        payment_date TEXT NOT NULL,
-                        FOREIGN KEY(admission_no) REFERENCES students(admission_no))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS fee_cycles (
-                        cycle_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        admission_no TEXT NOT NULL,
-                        due_date TEXT NOT NULL,
-                        FOREIGN KEY(admission_no) REFERENCES students(admission_no))''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_payments_admission ON payments(admission_no)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_fee_cycles_admission ON fee_cycles(admission_no)')
+        # Students table
+        c.execute('''
+            CREATE TABLE students (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_no TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                form TEXT NOT NULL
+            )
+        ''')
+        # Terms table
+        c.execute('''
+            CREATE TABLE terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                amount REAL NOT NULL
+            )
+        ''')
+        # Payments table
+        c.execute('''
+            CREATE TABLE payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                term_id INTEGER NOT NULL,
+                amount_paid REAL NOT NULL,
+                payment_date TEXT NOT NULL,
+                FOREIGN KEY(student_id) REFERENCES students(id),
+                FOREIGN KEY(term_id) REFERENCES terms(id)
+            )
+        ''')
         conn.commit()
+        conn.close()
 
-
-def get_db_connection():
-    """Establish and return a database connection."""
-    conn = sqlite3.connect(DATABASE)
+def query_db(query, args=(), one=False):
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
-
-
-def is_valid_phone(phone):
-    """Check if a phone number matches the expected format."""
-    return bool(PHONE_REGEX.match(phone))
-
-
-def send_sms(to_phone, message):
-    """Send an SMS using Twilio."""
-    sid = os.getenv('TWILIO_ACCOUNT_SID')
-    token = os.getenv('TWILIO_AUTH_TOKEN')
-    twilio_phone = os.getenv('TWILIO_PHONE_NUMBER')
-
-    if not all([sid, token, twilio_phone]):
-        logger.error("Missing Twilio credentials.")
-        flash("Missing Twilio credentials.", "error")
-        return False
-
-    if not is_valid_phone(to_phone):
-        flash("Invalid phone format.", "error")
-        return False
-
-    try:
-        Client(sid, token).messages.create(
-            body=message, from_=twilio_phone, to=to_phone
-        )
-        return True
-    except TwilioRestException as e:
-        logger.error("SMS send failed: %s", e)
-        flash("SMS failed due to server error.", "error")
-        return False
-
-
-def get_total_fee(adm):
-    """Get total fee amount for a student based on class."""
-    with get_db_connection() as conn:
-        student = conn.execute(
-            'SELECT class FROM students WHERE admission_no=?', (adm,)
-        ).fetchone()
-        if not student:
-            return None
-        fee = conn.execute(
-            'SELECT fee_amount FROM fee_structure WHERE class=?', (student['class'],)
-        ).fetchone()
-        return fee['fee_amount'] if fee else None
-
-
-def get_total_paid(adm):
-    """Get total amount paid by a student."""
-    with get_db_connection() as conn:
-        total = conn.execute(
-            'SELECT SUM(amount_paid) as total_paid FROM payments WHERE admission_no=?', (adm,)
-        ).fetchone()
-        return total['total_paid'] or 0.0
-
-
-def get_due_amount(adm):
-    """Calculate the due amount for a student, including late fees."""
-    total_fee = get_total_fee(adm)
-    if total_fee is None:
-        return None
-    total_paid = get_total_paid(adm)
-    late_fee = 0.0
-    today = datetime.now()
-
-    with get_db_connection() as conn:
-        cycles = conn.execute(
-            'SELECT due_date FROM fee_cycles WHERE admission_no=?', (adm,)
-        ).fetchall()
-
-    for cycle in cycles:
-        try:
-            due_date = datetime.strptime(cycle['due_date'], '%Y-%m-%d')
-        except ValueError:
-            continue
-        if today > due_date:
-            weeks = (today - due_date).days // 7
-            if weeks > 0 and total_fee - total_paid > 0:
-                late_fee += (total_fee - total_paid) * 0.02 * weeks
-
-    total_due = (total_fee + late_fee) - total_paid
-    return total_due if total_due > 0 else 0
-
+    cur = conn.execute(query, args)
+    rv = cur.fetchall()
+    conn.commit()
+    conn.close()
+    return (rv[0] if rv else None) if one else rv
 
 @app.route('/')
-def index():
-    """Render the homepage with student list and due info."""
-    with get_db_connection() as conn:
-        students = conn.execute('SELECT * FROM students').fetchall()
-    data = []
-    for s in students:
-        data.append({
-            'admission_no': s['admission_no'],
-            'name': s['name'],
-            'class': s['class'],
-            'phone': s['phone'],
-            'due_amount': get_due_amount(s['admission_no'])
-        })
-    return render_template('index.html', students=data)
+def home():
+    return redirect(url_for('view_students'))
 
+@app.route('/students')
+def view_students():
+    students = query_db('SELECT * FROM students')
+    return render_template('students.html', students=students)
 
-@app.route('/add_student', methods=['GET', 'POST'])
+@app.route('/terms')
+def view_terms():
+    terms = query_db('SELECT * FROM terms')
+    return render_template('terms.html', terms=terms)
+
+@app.route('/payments')
+def view_payments():
+    payments = query_db('''
+        SELECT payments.id, students.name AS student_name, students.admission_no,
+               terms.name AS term_name, payments.amount_paid, payments.payment_date
+        FROM payments
+        JOIN students ON payments.student_id = students.id
+        JOIN terms ON payments.term_id = terms.id
+        ORDER BY payments.payment_date DESC
+    ''')
+    students = query_db('SELECT * FROM students')
+    terms = query_db('SELECT * FROM terms')
+    return render_template('payments.html', payments=payments, students=students, terms=terms)
+
+@app.route('/student/add', methods=['POST'])
 def add_student():
-    """Add a new student to the database."""
-    if request.method == 'POST':
-        adm = request.form['admission_no'].strip()
-        name = request.form['name'].strip()
-        cls = request.form['class_name'].strip()
-        phone = request.form['phone'].strip()
+    admission_no = request.form['admission_no']
+    name = request.form['name']
+    form = request.form['form']
+    try:
+        query_db('INSERT INTO students (admission_no, name, form) VALUES (?, ?, ?)', 
+                 (admission_no, name, form))
+        flash("Student added successfully.")
+    except sqlite3.IntegrityError:
+        flash("Admission number must be unique.")
+    return redirect(url_for('view_students'))
 
-        if not all([adm, name, cls, phone]):
-            flash('All fields are required.', 'error')
-            return redirect(url_for('add_student'))
+@app.route('/term/add', methods=['POST'])
+def add_term():
+    name = request.form['term_name']
+    amount = request.form['amount']
+    try:
+        query_db('INSERT INTO terms (name, amount) VALUES (?, ?)', (name, amount))
+        flash("Term added successfully.")
+    except sqlite3.IntegrityError:
+        flash("Term name must be unique.")
+    return redirect(url_for('view_terms'))
 
-        if not is_valid_phone(phone):
-            flash('Invalid phone format.', 'error')
-            return redirect(url_for('add_student'))
+@app.route('/add_payment', methods=['POST'])
+def add_payment():
+    student_input = request.form.get('student_input', '').strip()
+    if not student_input:
+        flash("Student input is required.")
+        return redirect(url_for('view_payments'))
 
-        try:
-            with get_db_connection() as conn:
-                conn.execute(
-                    'INSERT INTO students (admission_no, name, class, phone) VALUES (?, ?, ?, ?)',
-                    (adm, name, cls, phone)
-                )
-                conn.commit()
-            flash('Student added.', 'success')
-        except sqlite3.IntegrityError:
-            flash('Admission number exists.', 'error')
+    try:
+        student_id_str = student_input.split(' - ')[0]
+        student_id = int(student_id_str)
+    except (IndexError, ValueError):
+        flash("Invalid student input format. Use 'ID - Name', e.g. '123 - John Doe'.")
+        return redirect(url_for('view_payments'))
 
-        return redirect(url_for('index'))
+    term_id = request.form.get('term_id')
+    amount_paid = request.form.get('amount_paid')
+    payment_date = request.form.get('payment_date')
 
-    return render_template('add_student.html')
+    if not term_id or not amount_paid or not payment_date:
+        flash("Please fill in all payment fields.")
+        return redirect(url_for('view_payments'))
 
+    try:
+        amount_paid = float(amount_paid)
+    except ValueError:
+        flash("Amount paid must be a number.")
+        return redirect(url_for('view_payments'))
 
-@app.route('/send_reminders')
-def send_reminders():
-    """Send SMS reminders to students with outstanding fees."""
-    with get_db_connection() as conn:
-        students = conn.execute('SELECT admission_no, name, phone FROM students').fetchall()
+    # Optional: Validate student_id and term_id exist
+    student = query_db('SELECT * FROM students WHERE id = ?', (student_id,), one=True)
+    term = query_db('SELECT * FROM terms WHERE id = ?', (term_id,), one=True)
+    if not student:
+        flash("Student not found.")
+        return redirect(url_for('view_payments'))
+    if not term:
+        flash("Term not found.")
+        return redirect(url_for('view_payments'))
 
-    count = 0
-    for s in students:
-        due = get_due_amount(s['admission_no'])
-        if due and due > 0:
-            msg = (
-                f"Dear Parent, student {s['name']} (Adm: {s['admission_no']}) "
-                f"owes ${due:.2f}. Kindly pay soon."
-            )
-            if send_sms(s['phone'], msg):
-                count += 1
+    query_db(
+        'INSERT INTO payments (student_id, term_id, amount_paid, payment_date) VALUES (?, ?, ?, ?)',
+        (student_id, int(term_id), amount_paid, payment_date)
+    )
+    flash("Payment added successfully.")
+    return redirect(url_for('view_payments'))
 
-    flash(f'Reminders sent to {count} students.', 'success')
-    return redirect(url_for('index'))
+# Edit Student
+@app.route('/student/edit/<int:id>', methods=['POST'])
+def edit_student(id):
+    name = request.form['name']
+    form = request.form['form']
+    query_db('UPDATE students SET name=?, form=? WHERE id=?', (name, form, id))
+    flash("Student updated successfully.")
+    return redirect(url_for('view_students'))
 
-@app.route('/set_fee', methods=['GET', 'POST'])
-def set_fee():
-    if request.method == 'POST':
-        class_name = request.form['class_name']
-        fee_amount = request.form['fee_amount']
-        
-        if not class_name or not fee_amount:
-            flash('All fields are required.', 'error')
-            return redirect(url_for('set_fee'))
+# Delete Student
+@app.route('/student/delete/<int:id>', methods=['POST'])
+def delete_student(id):
+    query_db('DELETE FROM students WHERE id=?', (id,))
+    flash("Student deleted successfully.")
+    return redirect(url_for('view_students'))
 
-        with sqlite3.connect(DATABASE) as conn:
-            c = conn.cursor()
-            c.execute('REPLACE INTO fee_structure (class, fee_amount) VALUES (?, ?)', (class_name, fee_amount))
-            conn.commit()
-        
-        flash('Fee set successfully!', 'success')
-        return redirect(url_for('set_fee'))
+# Edit Term
+@app.route('/term/edit/<int:id>', methods=['POST'])
+def edit_term(id):
+    name = request.form['term_name']
+    amount = request.form['amount']
+    query_db('UPDATE terms SET name=?, amount=? WHERE id=?', (name, amount, id))
+    flash("Term updated successfully.")
+    return redirect(url_for('view_terms'))
 
-    return render_template('set_fee.html')
-@app.route('/record_payment', methods=['GET', 'POST'])
-def record_payment():
-    with sqlite3.connect(DATABASE) as conn:
-        c = conn.cursor()
-        c.execute('SELECT admission_no, name FROM students')
-        students = c.fetchall()
+# Delete Term
+@app.route('/term/delete/<int:id>', methods=['POST'])
+def delete_term(id):
+    query_db('DELETE FROM terms WHERE id=?', (id,))
+    flash("Term deleted successfully.")
+    return redirect(url_for('view_terms'))
 
-    if request.method == 'POST':
-        admission_no = request.form['admission_no']
-        amount_paid = float(request.form['amount_paid'])
-        payment_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+# Edit Payment
+@app.route('/payment/edit/<int:id>', methods=['POST'])
+def edit_payment(id):
+    student_id = request.form['student_id']
+    term_id = request.form['term_id']
+    amount_paid = request.form['amount_paid']
+    payment_date = request.form['payment_date']
+    query_db('''
+        UPDATE payments SET student_id=?, term_id=?, amount_paid=?, payment_date=?
+        WHERE id=?
+    ''', (student_id, term_id, amount_paid, payment_date, id))
+    flash("Payment updated successfully.")
+    return redirect(url_for('view_payments'))
 
-        with sqlite3.connect(DATABASE) as conn:
-            c = conn.cursor()
-            c.execute('INSERT INTO payments (admission_no, amount_paid, payment_date) VALUES (?, ?, ?)',
-                      (admission_no, amount_paid, payment_date))
-            conn.commit()
+# Delete Payment
+@app.route('/payment/delete/<int:id>', methods=['POST'])
+def delete_payment(id):
+    query_db('DELETE FROM payments WHERE id=?', (id,))
+    flash("Payment deleted successfully.")
+    return redirect(url_for('view_payments'))
 
-        flash('Payment recorded successfully.', 'success')
-        return redirect(url_for('record_payment'))
+@app.route('/receipt/<int:payment_id>')
+def view_receipt(payment_id):
+    payment = query_db('''
+        SELECT payments.id, students.name AS student_name, students.admission_no,
+               students.form, terms.name AS term_name, terms.amount AS term_amount,
+               payments.amount_paid, payments.payment_date
+        FROM payments
+        JOIN students ON payments.student_id = students.id
+        JOIN terms ON payments.term_id = terms.id
+        WHERE payments.id = ?
+    ''', (payment_id,), one=True)
 
-    return render_template('record_payment.html', students=students)
-@app.route('/set_due_date', methods=['GET', 'POST'])
-def set_due_date():
-    with sqlite3.connect(DATABASE) as conn:
-        c = conn.cursor()
-        c.execute('SELECT admission_no, name FROM students')
-        students = c.fetchall()
+    if not payment:
+        return "Receipt not found", 404
 
-    if request.method == 'POST':
-        admission_no = request.form['admission_no']
-        due_date = request.form['due_date']
-
-        with sqlite3.connect(DATABASE) as conn:
-            c = conn.cursor()
-            c.execute('INSERT INTO fee_cycles (admission_no, due_date) VALUES (?, ?)',
-                      (admission_no, due_date))
-            conn.commit()
-
-        flash('Due date set successfully.', 'success')
-        return redirect(url_for('set_due_date'))
-
-    return render_template('set_due_date.html', students=students)
-@app.route('/check_due')
-def check_due():
-    with sqlite3.connect(DATABASE) as conn:
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute('SELECT * FROM students')
-        students = c.fetchall()
-
-    def get_total_fee(adm):
-        with sqlite3.connect(DATABASE) as conn:
-            c = conn.cursor()
-            c.execute('SELECT fee_amount FROM fee_structure WHERE class = (SELECT class FROM students WHERE admission_no=?)', (adm,))
-            result = c.fetchone()
-            return result[0] if result else 0.0
-
-    def get_total_paid(adm):
-        with sqlite3.connect(DATABASE) as conn:
-            c = conn.cursor()
-            c.execute('SELECT SUM(amount_paid) FROM payments WHERE admission_no = ?', (adm,))
-            result = c.fetchone()
-            return result[0] if result[0] else 0.0
-
-    def get_due_amount(adm):
-        return get_total_fee(adm) - get_total_paid(adm)
-
-    return render_template("check_due.html", students=students,
-                           get_total_fee=get_total_fee,
-                           get_total_paid=get_total_paid,
-                           get_due_amount=get_due_amount)
-# ... (all your route functions and other logic above)
+    return render_template('receipt.html', payment=payment, current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+@app.route('/reports/outstanding_balance')
+def report_outstanding_balance():
+    # Query students, total fees due (sum of all terms), total paid, outstanding
+    data = query_db('''
+        SELECT 
+            students.id,
+            students.name,
+            students.admission_no,
+            IFNULL(SUM(terms.amount), 0) AS total_due,
+            IFNULL(SUM(payments.amount_paid), 0) AS total_paid,
+            (IFNULL(SUM(terms.amount), 0) - IFNULL(SUM(payments.amount_paid), 0)) AS outstanding_balance
+        FROM students
+        LEFT JOIN terms ON 1=1
+        LEFT JOIN payments ON payments.student_id = students.id AND payments.term_id = terms.id
+        GROUP BY students.id
+        HAVING outstanding_balance > 0
+        ORDER BY outstanding_balance DESC
+    ''')
+    return render_template('reports_outstanding_balance.html', data=data)
 
 if __name__ == '__main__':
     init_db()
-    import os
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
-
+    app.run(debug=True, port=2000)
